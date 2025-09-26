@@ -19,6 +19,7 @@ typedef struct chip8_state {
     uint8_t sound_timer;
     uint8_t registers[16];
     uint8_t vram[64 * 32];
+    uint8_t keypad[16];
 } chip8_state_t;
 
 static struct timespec start, end;
@@ -29,10 +30,11 @@ void chip8_init(chip8_state_t* state) {
     for (int i = 0; i < 4096; i++) {
         state->memory[i] = 0;
     }
-    // Stack & Registers
+    // Stack, registers, keypad
     for (int i = 0; i < 16; i++) {
         state->stack[i] = 0;
         state->registers[i] = 0;
+        state->keypad[i] = 0;
     }
     // VRAM
     for (int i = 0; i < 64 * 32; i++) {
@@ -191,8 +193,9 @@ void chip8_op_add_reg(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
 }
 
 void chip8_op_subtract_xy(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
-    state->registers[0xF] = state->registers[reg_x] > state->registers[reg_y] ? 1 : 0;
+    uint8_t flag = state->registers[reg_x] >= state->registers[reg_y] ? 1 : 0;
     state->registers[reg_x] -= state->registers[reg_y];
+    state->registers[0xF] = flag;
     SDL_Log("8XY5: SUB V%X, V%X", reg_x, reg_y);
 }
 
@@ -205,8 +208,9 @@ void chip8_op_shr(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
 }
 
 void chip8_op_subtract_yx(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
-    state->registers[0xF] = state->registers[reg_y] > state->registers[reg_x] ? 1 : 0;
+    uint8_t flag = state->registers[reg_y] >= state->registers[reg_x] ? 1 : 0;
     state->registers[reg_x] = state->registers[reg_y] - state->registers[reg_x];
+    state->registers[0xF] = flag;
     SDL_Log("8XY7: SUB V%X, V%X", reg_x, reg_y);
 }
 
@@ -240,21 +244,6 @@ void chip8_op_rand(chip8_state_t *state, uint8_t reg_x, uint8_t value) {
     SDL_Log("CXNN: RAND V%X, %04X", reg_x, value);
 }
 
-void chip8_op_get_delay_timer(chip8_state_t *state, uint8_t reg_x) {
-    state->registers[reg_x] = state->delay_timer;
-    SDL_Log("FX07: SET V%X, DLY", reg_x);
-}
-
-void chip8_op_set_delay_timer(chip8_state_t *state, uint8_t reg_x) {
-    state->delay_timer = state->registers[reg_x];
-    SDL_Log("FX15: SET DLY, V%X", reg_x);
-}
-
-void chip8_op_set_sound_timer(chip8_state_t *state, uint8_t reg_x) {
-    state->sound_timer = state->registers[reg_x];
-    SDL_Log("FX18: SET SND, V%X", reg_x);
-}
-
 void chip8_op_draw(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y, uint8_t value) {
     uint8_t x = state->registers[reg_x] % 64;
     uint8_t y = state->registers[reg_y] % 32;
@@ -279,6 +268,73 @@ void chip8_op_draw(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y, uint8_t v
         }
     }
     SDL_Log("DXYN: Draw sprite at (%X, %X) with height %X", x, y, value);
+}
+
+void chip8_op_skip_key(chip8_state_t *state, uint8_t reg_x) {
+    if (state->keypad[state->registers[reg_x]]) {
+        state->program_counter += 2;
+    }
+    SDL_Log("EX9E: SKIP V%X", reg_x);
+}
+
+void chip8_op_skip_not_key(chip8_state_t *state, uint8_t reg_x) {
+    if (!state->keypad[state->registers[reg_x]]) {
+        state->program_counter += 2;
+    }
+    SDL_Log("EXA1: SKIP NOT V%X", reg_x);
+}
+
+void chip8_op_get_delay_timer(chip8_state_t *state, uint8_t reg_x) {
+    state->registers[reg_x] = state->delay_timer;
+    SDL_Log("FX07: SET V%X, DLY", reg_x);
+}
+
+void chip8_op_halt_key(chip8_state_t *state, uint8_t reg_x) {
+    SDL_Log("FX0A: HALT KEY V%X", reg_x);
+
+    for (int i = 0; i < 16; i++) {
+        if (state->keypad[i]) {
+            state->registers[reg_x] = i;
+            return;
+        }
+    }
+    state->program_counter -= 2; // Repeat this instruction
+}
+
+void chip8_op_set_delay_timer(chip8_state_t *state, uint8_t reg_x) {
+    state->delay_timer = state->registers[reg_x];
+    SDL_Log("FX15: SET DLY, V%X", reg_x);
+}
+
+void chip8_op_set_sound_timer(chip8_state_t *state, uint8_t reg_x) {
+    state->sound_timer = state->registers[reg_x];
+    SDL_Log("FX18: SET SND, V%X", reg_x);
+}
+
+void chip8_op_add_index(chip8_state_t *state, uint8_t reg_x) {
+    state->index_register += state->registers[reg_x];
+    SDL_Log("FX1E: ADDINDEX V%X", reg_x);
+}
+
+void chip8_op_coded_conversion(chip8_state_t *state, uint8_t reg_x) {
+    state->memory[state->index_register] = (state->registers[reg_x] / 100) % 10;
+    state->memory[state->index_register + 1] = (state->registers[reg_x] / 10) % 10;
+    state->memory[state->index_register + 2] = state->registers[reg_x] % 10;
+    SDL_Log("FX33: CONVERT V%X", reg_x);
+}
+
+void chip8_op_store_memory(chip8_state_t *state, uint8_t reg_x) {
+    for (int i = 0; i <= reg_x; i++) {
+        state->memory[state->index_register + i] = state->registers[i];
+    }
+    SDL_Log("FX55: STORE V0->V%X", reg_x);
+}
+
+void chip8_op_load_memory(chip8_state_t *state, uint8_t reg_x) {
+    for (int i = 0; i <= reg_x; i++) {
+        state->registers[i] = state->memory[state->index_register + i];
+    }
+    SDL_Log("FX65: LOAD V0->V%X", reg_x);
 }
 
 /**
@@ -376,16 +432,43 @@ void chip8_execute(chip8_state_t *state, uint16_t instruction) {
         case 0xD:
             chip8_op_draw(state, reg_x, reg_y, value_n);
             break;
+        case 0xE:
+            switch(value_nn) {
+                case 0x9E:
+                    chip8_op_skip_key(state, reg_x);
+                    break;
+                case 0xA1:
+                    chip8_op_skip_not_key(state, reg_x);
+                    break;
+                default:
+                    break;
+            }
+            break;
         case 0xF:
             switch (value_nn) {
                 case 0x07:
                     chip8_op_get_delay_timer(state, reg_x);
+                    break;
+                case 0x0A:
+                    chip8_op_halt_key(state, reg_x);
                     break;
                 case 0x15:
                     chip8_op_set_delay_timer(state, reg_x);
                     break;
                 case 0x18:
                     chip8_op_set_sound_timer(state, reg_x);
+                    break;
+                case 0x1E:
+                    chip8_op_add_index(state, reg_x);
+                    break;
+                case 0x33:
+                    chip8_op_coded_conversion(state, reg_x);
+                    break;
+                case 0x55:
+                    chip8_op_store_memory(state, reg_x);
+                    break;
+                case 0x65:
+                    chip8_op_load_memory(state, reg_x);
                     break;
                 default:
                     break;
@@ -412,7 +495,6 @@ void chip8_tick(chip8_state_t* state) {
     // Calculate remaining time to sleep
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    double remaining_time = (1.0 / IPS) - elapsed_time;
 
     // Update the timers
     last_timer_update += elapsed_time;
@@ -426,6 +508,7 @@ void chip8_tick(chip8_state_t* state) {
         last_timer_update -= TIMER_DECREMENT_INTERVAL; // Reset the timer update
     }
 
+    double remaining_time = (1.0 / IPS) - (elapsed_time + last_timer_update);
     if (remaining_time > 0) {
         struct timespec req;
         req.tv_sec = (time_t)remaining_time;
