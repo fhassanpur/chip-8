@@ -7,6 +7,8 @@
 #define IPS 700
 #define TIMER_DECREMENT_INTERVAL (1.0 / 60.0) // 60 Hz
 
+extern bool run_timers;
+
 static unsigned int START_ADDRESS = 0x200;
 
 typedef struct chip8_state {
@@ -22,6 +24,25 @@ typedef struct chip8_state {
     uint8_t keypad[16];
 } chip8_state_t;
 
+static const uint8_t font_data[] = {
+    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+    0x20, 0x60, 0x20, 0x20, 0x70, // 1
+    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+};
+
 static struct timespec start, end;
 static double last_timer_update = 0.0;
 
@@ -29,6 +50,10 @@ void chip8_init(chip8_state_t* state) {
     // Memory
     for (int i = 0; i < 4096; i++) {
         state->memory[i] = 0;
+    }
+    // Store font in memory
+    for (int i = 0; i < 80; i++) {
+        state->memory[i] = font_data[i];
     }
     // Stack, registers, keypad
     for (int i = 0; i < 16; i++) {
@@ -172,16 +197,19 @@ void chip8_op_set_reg(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
 
 void chip8_op_or(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
     state->registers[reg_x] |= state->registers[reg_y];
+    state->registers[0xF] = 0;
     SDL_Log("8XY1: OR V%X, V%X", reg_x, reg_y);
 }
 
 void chip8_op_and(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
     state->registers[reg_x] &= state->registers[reg_y];
+    state->registers[0xF] = 0;
     SDL_Log("8XY2: AND V%X, V%X", reg_x, reg_y);
 }
 
 void chip8_op_xor(chip8_state_t *state, uint8_t reg_x, uint8_t reg_y) {
     state->registers[reg_x] ^= state->registers[reg_y];
+    state->registers[0xF] = 0;
     SDL_Log("8XY3: XOR V%X, V%X", reg_x, reg_y);
 }
 
@@ -316,6 +344,11 @@ void chip8_op_add_index(chip8_state_t *state, uint8_t reg_x) {
     SDL_Log("FX1E: ADDINDEX V%X", reg_x);
 }
 
+void chip8_op_font_char(chip8_state_t *state, uint8_t reg_x) {
+    state->index_register = state->registers[reg_x] * 5;
+    SDL_Log("FX29: LD FONT, V%X", reg_x);
+}
+
 void chip8_op_coded_conversion(chip8_state_t *state, uint8_t reg_x) {
     state->memory[state->index_register] = (state->registers[reg_x] / 100) % 10;
     state->memory[state->index_register + 1] = (state->registers[reg_x] / 10) % 10;
@@ -327,6 +360,7 @@ void chip8_op_store_memory(chip8_state_t *state, uint8_t reg_x) {
     for (int i = 0; i <= reg_x; i++) {
         state->memory[state->index_register + i] = state->registers[i];
     }
+    state->index_register += reg_x + 1;
     SDL_Log("FX55: STORE V0->V%X", reg_x);
 }
 
@@ -334,6 +368,7 @@ void chip8_op_load_memory(chip8_state_t *state, uint8_t reg_x) {
     for (int i = 0; i <= reg_x; i++) {
         state->registers[i] = state->memory[state->index_register + i];
     }
+    state->index_register += reg_x + 1;
     SDL_Log("FX65: LOAD V0->V%X", reg_x);
 }
 
@@ -461,6 +496,9 @@ void chip8_execute(chip8_state_t *state, uint16_t instruction) {
                 case 0x1E:
                     chip8_op_add_index(state, reg_x);
                     break;
+                case 0x29:
+                    chip8_op_font_char(state, reg_x);
+                    break;
                 case 0x33:
                     chip8_op_coded_conversion(state, reg_x);
                     break;
@@ -480,6 +518,25 @@ void chip8_execute(chip8_state_t *state, uint16_t instruction) {
     }
 }
 
+void* chip8_timer_tick(void* arg) {
+    chip8_state_t* state = (chip8_state_t*)arg;
+
+    struct timespec req;
+    req.tv_sec = 0;
+    req.tv_nsec = TIMER_DECREMENT_INTERVAL * 1e9; // Convert seconds to nanoseconds
+
+    while (run_timers) {
+        nanosleep(&req, NULL);
+
+        if (state->delay_timer > 0) {
+            state->delay_timer--;
+        }
+        if (state->sound_timer > 0) {
+            state->sound_timer--;
+        }
+    }
+}
+
 void chip8_tick(chip8_state_t* state) {
     clock_gettime(CLOCK_MONOTONIC, &start);
 
@@ -492,23 +549,11 @@ void chip8_tick(chip8_state_t* state) {
     // Execute instruction
     chip8_execute(state, instruction);
 
-    // Calculate remaining time to sleep
     clock_gettime(CLOCK_MONOTONIC, &end);
+
+    // Calculate remaining time to sleep
     double elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-
-    // Update the timers
-    last_timer_update += elapsed_time;
-    if (last_timer_update >= TIMER_DECREMENT_INTERVAL) {
-        if (state->delay_timer > 0) {
-            state->delay_timer--;
-        }
-        if (state->sound_timer > 0) {
-            state->sound_timer--;
-        }
-        last_timer_update -= TIMER_DECREMENT_INTERVAL; // Reset the timer update
-    }
-
-    double remaining_time = (1.0 / IPS) - (elapsed_time + last_timer_update);
+    double remaining_time = (1.0 / IPS) - elapsed_time;
     if (remaining_time > 0) {
         struct timespec req;
         req.tv_sec = (time_t)remaining_time;

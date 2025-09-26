@@ -1,5 +1,6 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <pthread.h>
 
 #include "chip8.c"
 #include "input.c"
@@ -12,27 +13,30 @@ static SDL_Renderer *renderer;
 static SDL_Event event;
 
 static SDL_AudioStream *stream;
+static int sample_rate = 44100;
 static int cur_sine_sample = 0;
 
 static int scale_x = WINDOW_WIDTH / 64;
 static int scale_y = WINDOW_HEIGHT / 32;
 
+bool run_timers = false;
+
 void process_audio(uint8_t sound_timer) {
-    const int min_audio = 8000;
+    const int min_audio = 2000;
 
     if (SDL_GetAudioStreamQueued(stream) < min_audio && sound_timer > 0) {
-        static float samples[512];  /* this will feed 512 samples each frame until we get to our maximum. */
+        static float samples[512];
 
         /* generate a 440Hz pure tone */
         for (int i = 0; i < SDL_arraysize(samples); i++) {
             const int freq = 440;
-            const float phase = cur_sine_sample * freq / 8000.0f;
-            samples[i] = SDL_sinf(phase * 2 * SDL_PI_F);
+            const float phase = cur_sine_sample * freq / (float)sample_rate;
+            samples[i] = 0.75f * SDL_sinf(phase * 2 * SDL_PI_F);
             cur_sine_sample++;
         }
 
         /* wrapping around to avoid floating-point errors */
-        cur_sine_sample %= 8000;
+        cur_sine_sample %= sample_rate;
 
         /* feed the new data to the stream. It will queue at the end, and trickle out as the hardware needs more data. */
         SDL_PutAudioStreamData(stream, samples, sizeof (samples));
@@ -83,7 +87,7 @@ int main(int argc, char *argv[]) {
     SDL_AudioSpec audio_spec;
     audio_spec.channels = 1;
     audio_spec.format = SDL_AUDIO_F32;
-    audio_spec.freq = 8000;
+    audio_spec.freq = 44100;
     stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &audio_spec, NULL, NULL);
     if (!stream) {
         SDL_Log("Couldn't create audio stream: %s", SDL_GetError());
@@ -102,6 +106,11 @@ int main(int argc, char *argv[]) {
     }
     chip8_load_rom(&chip8_state, argv[1]);
 
+    // Setup delay and sound timer tick
+    run_timers = true;
+    pthread_t timer_thread;
+    pthread_create(&timer_thread, NULL, chip8_timer_tick, (void*)&chip8_state);
+
     // Main emulator loop
     while (true) {
 
@@ -116,6 +125,9 @@ int main(int argc, char *argv[]) {
         process_audio(chip8_state.sound_timer);
         render(chip8_state.vram);
     }
+
+    run_timers = false;
+    pthread_join(timer_thread, NULL);
 
     // Destroy resources
     SDL_DestroyRenderer(renderer);
